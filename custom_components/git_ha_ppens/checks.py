@@ -1,9 +1,4 @@
-"""Pre-deploy validation checks for git-ha-ppens.
-
-Runs a Home Assistant configuration check against the on-disk config before
-remote changes are kept. Used as a GitOps-style pre-deploy gate: if the check
-fails, the caller rolls back to the last working state.
-"""
+"""Validate on-disk HA config before keeping a pull; callers roll back on failure."""
 
 from __future__ import annotations
 
@@ -23,16 +18,7 @@ _NOTIFICATION_ID = f"{DOMAIN}_pre_deploy_check_failed"
 async def async_run_pre_deploy_check(
     hass: HomeAssistant, repo_path: str
 ) -> list[str]:
-    """Run the Home Assistant config check.
-
-    Args:
-        hass: The Home Assistant instance.
-        repo_path: The repository path being managed.
-
-    Returns:
-        A list of error messages. An empty list means the configuration is
-        valid (or the check was skipped because it is not applicable).
-    """
+    """Return config errors, or [] when valid or outside HA's config directory."""
     # The HA config check validates hass.config.config_dir. It only makes sense
     # when the repository IS the Home Assistant config directory. If it points
     # somewhere else, skip the check (treat as "pass") instead of blocking.
@@ -46,17 +32,20 @@ async def async_run_pre_deploy_check(
         return []
 
     try:
-        # Imported lazily so the integration loads even on HA cores where the
-        # helper signature differs.
+        # Lazy import tolerates HA cores with a different helper signature.
         from homeassistant.helpers.check_config import async_check_ha_config_file
 
         result = await async_check_ha_config_file(hass)
-    except Exception as err:  # noqa: BLE001 - never let the gate crash a pull
-        _LOGGER.warning(
-            "Pre-deploy check could not run (%s); allowing pull to proceed",
+    except Exception as err:  # noqa: BLE001 - fail closed: a gate that cannot run must block
+        # Fail CLOSED: if the validator itself cannot run we cannot prove the
+        # config is good, so block the pull (and roll back) rather than waving
+        # unvalidated config through to the live config dir. The error is
+        # surfaced via the persistent notification so the cause is visible.
+        _LOGGER.error(
+            "Pre-deploy check could not run (%s); blocking pull (fail-closed)",
             err,
         )
-        return []
+        return [f"Pre-deploy config check could not run: {err}"]
 
     errors = [err.message for err in result.errors]
     if errors:
