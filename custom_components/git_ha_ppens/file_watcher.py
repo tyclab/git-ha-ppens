@@ -13,9 +13,10 @@ from watchdog.observers import Observer
 from homeassistant.core import HomeAssistant
 
 from .ai_commit import async_generate_ai_commit_message
+from .checks import notify_sync_blocked
 from .const import EVENT_COMMIT, EVENT_ERROR, EVENT_PUSH
 from .coordinator import GitHaPpensCoordinator
-from .git_manager import GitError, GitManager
+from .git_manager import GitConflictError, GitError, GitManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -306,6 +307,13 @@ class GitFileWatcher:
                             "Auto-push: %d commit(s) pushed to remote",
                             commits_pushed,
                         )
+                    except GitConflictError as push_err:
+                        _LOGGER.error("Auto-push aborted: %s", push_err)
+                        self._hass.bus.async_fire(
+                            EVENT_ERROR,
+                            {"operation": "auto_push", "error": str(push_err)},
+                        )
+                        notify_sync_blocked(self._hass, "auto-push", str(push_err))
                     except GitError as push_err:
                         _LOGGER.error("Auto-push failed: %s", push_err)
                         self._hass.bus.async_fire(

@@ -10,7 +10,11 @@ from datetime import datetime, timedelta, timezone
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .checks import async_run_pre_deploy_check, notify_check_failed
+from .checks import (
+    async_run_pre_deploy_check,
+    notify_check_failed,
+    notify_sync_blocked,
+)
 from .const import (
     DEFAULT_FETCH_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -20,7 +24,13 @@ from .const import (
     EVENT_FETCH,
     EVENT_PULL,
 )
-from .git_manager import GitError, GitManager, GitStatus, PreDeployCheckError
+from .git_manager import (
+    GitConflictError,
+    GitError,
+    GitManager,
+    GitStatus,
+    PreDeployCheckError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,8 +65,8 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
         self._last_fetch_time: datetime | None = None
         self._last_pull_time: datetime | None = None
         self._last_push_time: datetime | None = None
-        # Remote SHA whose auto-pull was blocked by a failed pre-deploy check;
-        # skip re-attempting (and re-running the heavy check) until it changes.
+        # Remote SHA whose auto-pull was blocked (failed pre-deploy check, or a
+        # conflicting merge); skip re-attempting it until the remote advances.
         self._blocked_remote_sha: str | None = None
 
     @property
@@ -115,9 +125,8 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                 )
                 return status
 
-            # Skip remote commits already blocked by a failed pre-deploy check
-            # until the remote advances, to avoid re-running the heavy check
-            # (and re-notifying) on every poll.
+            # Skip remote commits already blocked, until the remote advances, to
+            # avoid re-running the heavy check (or re-conflicting) every poll.
             upstream_sha = await self.git_manager.get_upstream_sha()
             if (
                 self._blocked_remote_sha is not None
@@ -125,7 +134,7 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
             ):
                 _LOGGER.debug(
                     "Skipping auto-pull: remote %s previously blocked by "
-                    "pre-deploy check",
+                    "pre-deploy check or conflict",
                     upstream_sha[:8],
                 )
                 return status
@@ -167,6 +176,18 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                         status = await self.git_manager.get_status()
                     except GitError:
                         pass
+
+                except GitConflictError as err:
+                    _LOGGER.error("Auto-pull aborted: %s", err)
+                    # Same suppression as a failed pre-deploy check: without it
+                    # the conflicting remote would be re-pulled and re-aborted
+                    # every poll.
+                    self._blocked_remote_sha = upstream_sha or None
+                    self.hass.bus.async_fire(
+                        EVENT_ERROR,
+                        {"operation": "auto_pull", "error": str(err)},
+                    )
+                    notify_sync_blocked(self.hass, "auto-pull", str(err))
 
                 except GitError as err:
                     _LOGGER.warning("Auto-pull failed: %s", err)

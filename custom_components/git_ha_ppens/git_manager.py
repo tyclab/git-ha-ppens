@@ -66,6 +66,14 @@ class PreDeployCheckError(GitError):
         super().__init__(f"Pre-deploy check failed: {joined}")
 
 
+class GitConflictError(GitError):
+    """LOCAL PATCH (tycstation): sync aborted on conflict or stale divergence.
+
+    Raised instead of resolving the situation automatically. The working tree is
+    left on its pre-sync commit — no half-merged tree, no force-push.
+    """
+
+
 class GitManager:
     """Manages git operations for the Home Assistant config directory."""
 
@@ -235,6 +243,13 @@ class GitManager:
         """Hard-reset the working tree to the given ref (rollback)."""
         await self._run_git("reset", "--hard", ref)
         _LOGGER.info("Rolled back working tree to %s", ref[:8])
+
+    async def _merge_in_progress(self) -> bool:
+        """Return True while an unresolved merge is in progress."""
+        result = await self._run_git(
+            "rev-parse", "--verify", "--quiet", "MERGE_HEAD", check=False
+        )
+        return bool(result.strip())
 
     async def get_upstream_sha(self) -> str:
         """Return the upstream tracking branch SHA (empty string if none)."""
@@ -440,16 +455,13 @@ class GitManager:
     async def push(self) -> int:
         """Push commits to the configured remote.
 
-        Handles multiple scenarios robustly:
-        1. Normal push (fast-forward)
-        2. Divergent histories (remote initialized with README)
-        3. First push (no upstream tracking branch)
-
         Returns:
             Number of commits that were pushed.
 
         Raises:
-            GitError: If push fails after all retry attempts.
+            GitConflictError: If the remote moved and the local branch is stale
+                or diverged — nothing is merged or force-pushed.
+            GitError: If the push fails for any other reason.
         """
         # Pre-check: verify remote is configured before attempting any push
         if not await self.is_remote_configured():
@@ -485,16 +497,15 @@ class GitManager:
             except (GitError, ValueError):
                 ahead = 0
 
-        # === ATTEMPT 1: Normal push ===
         try:
             await self._run_git("push", "-u", "origin", branch)
             _LOGGER.info("Push successful: %d commit(s) to origin/%s", ahead, branch)
             return ahead
         except GitError as err:
             error_lower = str(err).lower()
-            _LOGGER.warning("Push attempt 1 failed: %s", err)
+            _LOGGER.warning("Push rejected: %s", err)
 
-            # Check if it's a permission/auth/config error — don't retry these
+            # Auth/config errors say nothing about divergence — surface as-is.
             if any(keyword in error_lower for keyword in [
                 "permission denied",
                 "403",
@@ -516,74 +527,32 @@ class GitManager:
                 )
                 raise
 
-            # For any other error (divergent history, rejected, etc.), try to resolve
-            _LOGGER.info("Attempting to resolve push conflict...")
+            push_err = err
 
-        # === ATTEMPT 2: Fetch + merge with allow-unrelated-histories ===
-        try:
-            # First try to fetch remote state
-            await self._run_git("fetch", "origin", branch)
+        # LOCAL PATCH (tycstation): abort and alert on conflict or stale
+        # divergence. Upstream escalated a rejected push to an unrelated-histories
+        # merge and then to a leased force-push; this box pushes straight to a
+        # protected `main`, so both would publish an unreviewed — possibly
+        # conflicted — tree. The pre-deploy-checked pull path heals divergence
+        # here. See HACS_COMPONENTS.md; the CI fork gate greps for those flags.
+        await self._run_git("fetch", "origin", branch, check=False)
+        behind = 0
+        ab_output = await self._run_git(
+            "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}",
+            check=False,
+        )
+        parts = ab_output.split()
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            ahead, behind = int(parts[0]), int(parts[1])
 
-            # Check if remote branch exists and has commits
-            remote_ref = f"origin/{branch}"
-            remote_exists = await self._run_git(
-                "rev-parse", "--verify", remote_ref, check=False
-            )
-            has_remote_commits = (
-                bool(remote_exists)
-                and len(remote_exists) >= 40
-                and "fatal" not in remote_exists.lower()
-            )
+        if behind > 0:
+            raise GitConflictError(
+                f"Push to origin/{branch} rejected: local is {ahead} ahead and "
+                f"{behind} behind. Not merging and not force-pushing — pull "
+                f"(pre-deploy checked) or resolve by hand."
+            ) from push_err
 
-            if has_remote_commits:
-                # Remote has commits — merge allowing unrelated histories
-                _LOGGER.info(
-                    "Remote has existing commits — merging with allow-unrelated-histories"
-                )
-                await self._run_git(
-                    "merge", "--allow-unrelated-histories", "--no-edit",
-                    remote_ref,
-                )
-            # else: remote branch is empty, straight push should work
-
-            # Retry push
-            await self._run_git("push", "-u", "origin", branch)
-            _LOGGER.info(
-                "Push successful after merge: %d commit(s) to origin/%s",
-                ahead, branch,
-            )
-            return ahead
-
-        except GitError as merge_err:
-            merge_error_lower = str(merge_err).lower()
-            _LOGGER.warning("Push attempt 2 (merge) failed: %s", merge_err)
-
-            # If merge conflict, try force push as last resort
-            if "conflict" in merge_error_lower or "merge" in merge_error_lower:
-                _LOGGER.warning("Merge conflict detected, aborting merge...")
-                await self._run_git("merge", "--abort", check=False)
-
-        # === ATTEMPT 3: Force push with lease (safe force push) ===
-        try:
-            _LOGGER.warning(
-                "Attempting force push with lease as last resort "
-                "(this overwrites remote but is safe for single-user repos)"
-            )
-            await self._run_git("push", "--force-with-lease", "-u", "origin", branch)
-            _LOGGER.info(
-                "Force push successful: %d commit(s) to origin/%s",
-                ahead, branch,
-            )
-            return ahead
-        except GitError as force_err:
-            _LOGGER.error(
-                "All push attempts failed. Last error: %s. "
-                "Please check: 1) PAT has 'repo' scope, "
-                "2) Remote URL is correct, "
-                "3) Repository exists on GitHub.",
-                force_err,
-            )
-            raise
+        raise push_err
 
     async def fetch(self) -> None:
         """Fetch from the configured remote without merging.
@@ -619,6 +588,7 @@ class GitManager:
 
         Raises:
             PreDeployCheckError: If validation fails (after rolling back).
+            GitConflictError: If the merge conflicts (after aborting it).
             GitError: If the pull itself fails.
         """
         # Pre-check: verify remote is configured
@@ -653,7 +623,29 @@ class GitManager:
         pre_pull_head = await self.get_head_sha()
 
         branch = await self._run_git("rev-parse", "--abbrev-ref", "HEAD")
-        await self._run_git("pull", "origin", branch)
+        try:
+            # --no-rebase: without a pull strategy configured, git 2.33+ refuses
+            # divergent branches outright, so the merge below never starts.
+            await self._run_git("pull", "--no-rebase", "origin", branch)
+        except GitError as err:
+            # LOCAL PATCH (tycstation): a conflicted merge leaves conflict
+            # markers in the live config, and the next auto-commit would
+            # `git add -A` them straight onto protected `main`. Abort the merge
+            # so /config stays on its last-good commit, and alert.
+            if await self._merge_in_progress():
+                # Name the files before aborting — afterwards there is nothing
+                # left to read them from.
+                unmerged = await self._run_git(
+                    "diff", "--name-only", "--diff-filter=U", check=False
+                )
+                files = ", ".join(unmerged.split()) or "unknown files"
+                await self._run_git("merge", "--abort", check=False)
+                raise GitConflictError(
+                    f"Pull from origin/{branch} conflicted on {files}; the "
+                    f"merge was aborted and the working tree stays on "
+                    f"{pre_pull_head[:8]}. Resolve by hand."
+                ) from err
+            raise
 
         # Count new commits
         try:

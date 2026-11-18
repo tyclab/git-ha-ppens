@@ -13,6 +13,7 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 _NOTIFICATION_ID = f"{DOMAIN}_pre_deploy_check_failed"
+_SYNC_BLOCKED_NOTIFICATION_ID = f"{DOMAIN}_sync_blocked"
 
 
 async def async_run_pre_deploy_check(
@@ -68,4 +69,25 @@ def notify_check_failed(hass: HomeAssistant, errors: list[str]) -> None:
         ),
         title="git-ha-ppens: Pull blocked",
         notification_id=_NOTIFICATION_ID,
+    )
+
+
+def notify_sync_blocked(hass: HomeAssistant, operation: str, reason: str) -> None:
+    """Surface an aborted pull/push in the UI via a persistent notification.
+
+    LOCAL PATCH (tycstation): conflict and stale divergence used to be resolved
+    silently (auto-merge, force-push). They now stop the sync, so they need to
+    be visible — a fixed notification id keeps a stuck box to one notification.
+    """
+    persistent_notification.async_create(
+        hass,
+        (
+            f"git-ha-ppens aborted the **{operation}**: `/config` and `main` "
+            "are out of sync. Nothing was merged and nothing was force-pushed, "
+            "so the working tree is unchanged — but the box is no longer "
+            "syncing until this is resolved.\n\n"
+            f"{reason}"
+        ),
+        title="git-ha-ppens: Sync blocked",
+        notification_id=_SYNC_BLOCKED_NOTIFICATION_ID,
     )
