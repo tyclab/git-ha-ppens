@@ -1,6 +1,4 @@
 {
   "name": "git-ha-ppens",
-  "render_readme": true,
-  "zip_release": true,
-  "filename": "git_ha_ppens.zip"
+  "render_readme": true
 }
