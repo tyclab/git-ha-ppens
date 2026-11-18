@@ -10,7 +10,8 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant
 
 from .ai_commit import async_generate_ai_commit_message
 from .checks import notify_secret_blocked, notify_sync_blocked
@@ -175,6 +176,7 @@ class GitFileWatcher:
         self._observer: Observer | None = None
         self._change_collector: _ChangeCollector | None = None
         self._debounce_handle: asyncio.TimerHandle | None = None
+        self._stop_unsub: Callable[[], None] | None = None
         self._running = False
 
     @property
@@ -203,16 +205,30 @@ class GitFileWatcher:
         # Start observer in executor to avoid blocking
         await self._hass.async_add_executor_job(self._observer.start)
         self._running = True
+        # LOCAL PATCH (tycstation): stop with Home Assistant. Nothing unloads the
+        # entry on a restart, so the watchdog thread outlived the event loop and
+        # the files HA writes while stopping raised "Event loop is closed".
+        self._stop_unsub = self._hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STOP, self._async_on_hass_stop
+        )
         _LOGGER.info(
             "File watcher started for %s (debounce: %ds)",
             self._repo_path,
             self._debounce_seconds,
         )
 
+    async def _async_on_hass_stop(self, _event: Event) -> None:
+        """Home Assistant is stopping: the listener has fired, so only stop."""
+        self._stop_unsub = None
+        await self.async_stop()
+
     async def async_stop(self) -> None:
         """Stop watching for file changes."""
         if not self._running:
             return
+        if self._stop_unsub:
+            self._stop_unsub()
+            self._stop_unsub = None
 
         # Cancel pending debounce
         if self._debounce_handle:
@@ -232,7 +248,13 @@ class GitFileWatcher:
 
         Thread-safe: can be called from the watchdog background thread.
         """
-        self._hass.loop.call_soon_threadsafe(self._schedule_commit_on_loop)
+        loop = self._hass.loop
+        if loop.is_closed():  # a change after shutdown has no commit to schedule
+            return
+        try:
+            loop.call_soon_threadsafe(self._schedule_commit_on_loop)
+        except RuntimeError:  # closed between the check and the call
+            return
 
     def _schedule_commit_on_loop(self) -> None:
         """Schedule the debounced commit on the event loop (must run on loop thread)."""
