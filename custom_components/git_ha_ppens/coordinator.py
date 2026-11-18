@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .checks import (
     async_run_pre_deploy_check,
     notify_check_failed,
+    notify_secret_blocked,
     notify_sync_blocked,
 )
 from .const import (
@@ -30,6 +31,7 @@ from .git_manager import (
     GitManager,
     GitStatus,
     PreDeployCheckError,
+    SecretPathBlockedError,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -188,6 +190,20 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                         {"operation": "auto_pull", "error": str(err)},
                     )
                     notify_sync_blocked(self.hass, "auto-pull", str(err))
+
+                # Ahead of the GitError arm it subclasses; the pull is aborted
+                # with the index reset, so nothing was committed or merged.
+                except SecretPathBlockedError as err:
+                    _LOGGER.error("Auto-pull refused: %s", err)
+                    self.hass.bus.async_fire(
+                        EVENT_ERROR,
+                        {
+                            "operation": "auto_pull",
+                            "error": str(err),
+                            "secret_paths": err.paths,
+                        },
+                    )
+                    notify_secret_blocked(self.hass, "auto-pull backup", err.paths)
 
                 except GitError as err:
                     _LOGGER.warning("Auto-pull failed: %s", err)

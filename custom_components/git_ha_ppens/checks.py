@@ -14,6 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _NOTIFICATION_ID = f"{DOMAIN}_pre_deploy_check_failed"
 _SYNC_BLOCKED_NOTIFICATION_ID = f"{DOMAIN}_sync_blocked"
+_SECRET_BLOCKED_NOTIFICATION_ID = f"{DOMAIN}_secret_blocked"
 
 
 async def async_run_pre_deploy_check(
@@ -90,4 +91,32 @@ def notify_sync_blocked(hass: HomeAssistant, operation: str, reason: str) -> Non
         ),
         title="git-ha-ppens: Sync blocked",
         notification_id=_SYNC_BLOCKED_NOTIFICATION_ID,
+    )
+
+
+def notify_secret_blocked(
+    hass: HomeAssistant, operation: str, paths: list[str]
+) -> None:
+    """Surface a refused commit in the UI via a persistent notification.
+
+    LOCAL PATCH (tycstation): separate from notify_sync_blocked because the
+    remedy is different — nothing diverged, a file simply must not be committed.
+    """
+    bullet_list = "\n".join(f"- `{path}`" for path in paths)
+    persistent_notification.async_create(
+        hass,
+        (
+            f"git-ha-ppens refused the **{operation}**: the staged paths below "
+            "look like secrets, and `main` is protected and auto-pushed, so a "
+            "secret committed there can only be rotated, never removed. "
+            "Nothing was committed and the index was reset — the box stops "
+            "syncing box-side edits until this is resolved.\n\n"
+            f"{bullet_list}\n\n"
+            "Untracked: add them to `.gitignore` or delete them. Already "
+            "tracked: `git rm --cached <path>` on the box, add it to "
+            "`.gitignore`, and commit that removal by hand — this guard only "
+            "gates the integration's own commits."
+        ),
+        title="git-ha-ppens: Commit refused",
+        notification_id=_SECRET_BLOCKED_NOTIFICATION_ID,
     )

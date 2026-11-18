@@ -143,3 +143,18 @@ SECRET_PATTERNS: Final = [
     r"glpat-[\w\-]{20}",  # GitLab personal access token
     r"sk-[a-zA-Z0-9]{32,}",  # OpenAI-style keys
 ]
+
+# Secret-shaped PATHS the commit path refuses, matched against staged paths
+# (POSIX, repo-relative). SECRET_PATTERNS above cannot do this job: it is
+# content-based, keyed on a fixed extension whitelist, and runs at setup rather
+# than in the commit path — without this list, auto_commit + auto_push leave
+# .gitignore as the only check between /config and protected `main`.
+SECRET_PATH_PATTERNS: Final = [
+    r"(^|/)secrets\.yaml$",  # HA + ESPHome secret stores
+    r"(^|/)homeassistant\.json$",  # runtime access/refresh tokens (observed leak)
+    r"\.bak",  # editor/HA backups of the above (observed leak)
+    r"(^|/)\.ssh/",  # the git-ha-ppens read-write deploy key
+    r"(^|/)\.storage/",  # auth tokens, config entries, runtime state
+    r"(^|/)id_(rsa|dsa|ecdsa|ed25519)$",  # bare private keys (no extension)
+    r"\.(pem|key|p12|pfx|jks|keystore)$",  # keys/keystores by extension
+]

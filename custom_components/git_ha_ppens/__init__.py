@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers.event import async_track_time_interval
 
 from .ai_commit import async_generate_ai_commit_message
-from .checks import notify_check_failed
+from .checks import notify_check_failed, notify_secret_blocked
 from .const import (
     ATTR_MESSAGE,
     AUTH_SSH,
@@ -56,7 +56,12 @@ from .const import (
 )
 from .coordinator import GitHaPpensCoordinator
 from .file_watcher import GitFileWatcher
-from .git_manager import GitError, GitManager, PreDeployCheckError
+from .git_manager import (
+    GitError,
+    GitManager,
+    PreDeployCheckError,
+    SecretPathBlockedError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,6 +185,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning(
                     "Initial commit returned None — no changes to commit"
                 )
+        # Ahead of the GitError arm it subclasses, or the refusal reads as a
+        # permissions problem.
+        except SecretPathBlockedError as err:
+            _LOGGER.error("Initial commit refused: %s", err)
+            notify_secret_blocked(hass, "initial commit", err.paths)
         except GitError as err:
             _LOGGER.error(
                 "Failed to create initial commit: %s. "
@@ -367,6 +377,17 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
             await coordinator.async_request_refresh()
 
+        except SecretPathBlockedError as err:
+            _LOGGER.error("Commit refused: %s", err)
+            hass.bus.async_fire(
+                EVENT_ERROR,
+                {
+                    "operation": "commit",
+                    "error": str(err),
+                    "secret_paths": err.paths,
+                },
+            )
+            notify_secret_blocked(hass, "commit", err.paths)
         except GitError as err:
             _LOGGER.error("Commit failed: %s", err)
             hass.bus.async_fire(
@@ -414,6 +435,20 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             )
             notify_check_failed(hass, err.errors)
             await coordinator.async_request_refresh()
+
+        # Ahead of the GitError arm it subclasses; the pull is aborted with the
+        # index reset, so nothing was committed or merged.
+        except SecretPathBlockedError as err:
+            _LOGGER.error("Pull refused: %s", err)
+            hass.bus.async_fire(
+                EVENT_ERROR,
+                {
+                    "operation": "pull",
+                    "error": str(err),
+                    "secret_paths": err.paths,
+                },
+            )
+            notify_secret_blocked(hass, "pull backup", err.paths)
 
         except GitError as err:
             _LOGGER.error("Pull failed: %s", err)
@@ -485,6 +520,19 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
             await coordinator.async_request_refresh()
 
+        # Ahead of the GitError arm, and ahead of the push — a refused commit
+        # must not turn into a push of whatever else is queued.
+        except SecretPathBlockedError as err:
+            _LOGGER.error("Sync refused: %s", err)
+            hass.bus.async_fire(
+                EVENT_ERROR,
+                {
+                    "operation": "sync",
+                    "error": str(err),
+                    "secret_paths": err.paths,
+                },
+            )
+            notify_secret_blocked(hass, "sync", err.paths)
         except GitError as err:
             _LOGGER.error("Sync failed: %s", err)
             hass.bus.async_fire(

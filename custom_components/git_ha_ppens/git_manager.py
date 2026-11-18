@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .const import DEFAULT_GITIGNORE_ENTRIES, SECRET_PATTERNS
+from .const import (
+    DEFAULT_GITIGNORE_ENTRIES,
+    SECRET_PATH_PATTERNS,
+    SECRET_PATTERNS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +76,29 @@ class GitConflictError(GitError):
     Raised instead of resolving the situation automatically. The working tree is
     left on its pre-sync commit — no half-merged tree, no force-push.
     """
+
+
+class SecretPathBlockedError(GitError):
+    """LOCAL PATCH (tycstation): commit refused, a staged path looks like a secret.
+
+    Its own type rather than GitConflictError because the remedy differs: a
+    conflict means /config and `main` diverged and need a merge, while this
+    means a file must never reach `main` at all and needs ignoring or deleting. Callers must catch this BEFORE their ``except
+    GitError`` arm, or the refusal degrades into a generic "commit failed".
+    """
+
+    def __init__(self, paths: list[str]) -> None:
+        """Store the offending staged paths."""
+        self.paths = paths
+        joined = ", ".join(paths)
+        super().__init__(
+            "Commit refused: the following staged paths look like secrets and "
+            f"must never reach `main`: {joined}. Untracked: add them to "
+            ".gitignore or delete them. Already tracked: on the box, "
+            "`git rm --cached <path>`, add it to .gitignore and commit that "
+            "removal by hand — this guard only gates the integration's own "
+            "commits, and the sync stays stopped until the path is gone."
+        )
 
 
 class GitManager:
@@ -408,6 +435,10 @@ class GitManager:
         # Stage all changes (respecting .gitignore)
         await self._run_git("add", "-A")
 
+        # Refuse BEFORE the commit exists: auto_push puts it on protected
+        # `main`, where history cannot be rewritten to drop a leaked secret.
+        await self._assert_no_secret_paths_staged()
+
         # Commit
         await self._run_git("commit", "-m", message)
 
@@ -433,6 +464,44 @@ class GitManager:
             return commit_info
 
         return None
+
+    async def _assert_no_secret_paths_staged(self) -> None:
+        """Unstage and refuse if any staged path is secret-shaped.
+
+        Raises:
+            SecretPathBlockedError: If a staged path matches
+                SECRET_PATH_PATTERNS. The index is reset first, so the caller
+                that handles this leaves no commit and no staged secret behind.
+        """
+        # quotePath=false: git C-quotes any path with a non-ASCII byte
+        # ("k\303\274che/secrets.yaml", trailing quote included), which defeats
+        # every anchored pattern. check stays on — a guard that reads the index
+        # must fail closed, not treat an unreadable index as clean.
+        staged = await self._run_git(
+            "-c", "core.quotePath=false", "diff", "--cached", "--name-only"
+        )
+        if not staged:
+            return
+
+        patterns = [re.compile(p, re.IGNORECASE) for p in SECRET_PATH_PATTERNS]
+        offenders = [
+            path
+            for path in (line.strip() for line in staged.splitlines())
+            if path and any(p.search(path) for p in patterns)
+        ]
+        if not offenders:
+            return
+
+        # Leave the index clean so the next cycle re-evaluates from scratch
+        # instead of inheriting a poisoned staging area.
+        await self._run_git("reset", check=False)
+
+        _LOGGER.error(
+            "Commit refused: %d secret-shaped path(s) staged: %s",
+            len(offenders),
+            ", ".join(offenders),
+        )
+        raise SecretPathBlockedError(offenders)
 
     def _generate_commit_message(self, porcelain_output: str) -> str:
         """Generate a commit message from porcelain status output."""
@@ -589,6 +658,8 @@ class GitManager:
         Raises:
             PreDeployCheckError: If validation fails (after rolling back).
             GitConflictError: If the merge conflicts (after aborting it).
+            SecretPathBlockedError: If the backup commit would stage a
+                secret-shaped path (index reset, nothing committed or pulled).
             GitError: If the pull itself fails.
         """
         # Pre-check: verify remote is configured
@@ -604,6 +675,10 @@ class GitManager:
             porcelain = await self._run_git("status", "--porcelain")
             if porcelain:
                 await self._run_git("add", "-A")
+                # Same refusal as commit(): a path the auto-commit guard already
+                # rejected is still on disk, and `add -A` would sweep it into
+                # this commit, which auto_push then puts on protected `main`.
+                await self._assert_no_secret_paths_staged()
                 await self._run_git(
                     "commit", "-m",
                     "Backup: auto-saved before pull"

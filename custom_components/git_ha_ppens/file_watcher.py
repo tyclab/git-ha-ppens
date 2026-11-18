@@ -13,10 +13,15 @@ from watchdog.observers import Observer
 from homeassistant.core import HomeAssistant
 
 from .ai_commit import async_generate_ai_commit_message
-from .checks import notify_sync_blocked
+from .checks import notify_secret_blocked, notify_sync_blocked
 from .const import EVENT_COMMIT, EVENT_ERROR, EVENT_PUSH
 from .coordinator import GitHaPpensCoordinator
-from .git_manager import GitConflictError, GitError, GitManager
+from .git_manager import (
+    GitConflictError,
+    GitError,
+    GitManager,
+    SecretPathBlockedError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -322,6 +327,18 @@ class GitFileWatcher:
                         )
 
                 await self._coordinator.async_request_refresh()
+        # Ahead of the GitError arm it subclasses; nothing is pushed either.
+        except SecretPathBlockedError as err:
+            _LOGGER.error("Auto-commit refused: %s", err)
+            self._hass.bus.async_fire(
+                EVENT_ERROR,
+                {
+                    "operation": "auto_commit",
+                    "error": str(err),
+                    "secret_paths": err.paths,
+                },
+            )
+            notify_secret_blocked(self._hass, "auto-commit", err.paths)
         except GitError as err:
             _LOGGER.error("Auto-commit failed: %s", err)
             self._hass.bus.async_fire(
