@@ -10,6 +10,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.service import async_register_admin_service
 
@@ -51,12 +52,19 @@ from .const import (
     SERVICE_COMMIT,
     SERVICE_DIFF,
     SERVICE_FETCH,
+    SERVICE_FLASH_ESPHOME,
     SERVICE_PULL,
     SERVICE_PUSH,
     SERVICE_SYNC,
 )
 from .coordinator import GitHaPpensCoordinator
-from .deploy import async_init_applied, async_plan_pull, async_schedule_apply
+from .deploy import (
+    async_init_applied,
+    async_plan_pull,
+    async_queue_esphome,
+    async_schedule_apply,
+    async_schedule_esphome,
+)
 from .file_watcher import GitFileWatcher
 from .git_manager import (
     GitError,
@@ -69,6 +77,14 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
+# LOCAL PATCH (tycstation): node config file names under esphome/, or * for every node.
+SERVICE_FLASH_ESPHOME_SCHEMA = vol.Schema(
+    {
+        vol.Required("configurations"): vol.All(
+            cv.ensure_list, [vol.Match(r"^(\*|[A-Za-z0-9_-]+\.ya?ml)$")], vol.Length(min=1)
+        ),
+    }
+)
 SERVICE_COMMIT_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_MESSAGE): str,
@@ -321,7 +337,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Remove services if no more entries
         if not hass.data[DOMAIN]:
-            for service in (SERVICE_COMMIT, SERVICE_PUSH, SERVICE_PULL, SERVICE_FETCH, SERVICE_SYNC, SERVICE_DIFF):
+            for service in (SERVICE_COMMIT, SERVICE_PUSH, SERVICE_PULL, SERVICE_FETCH, SERVICE_SYNC, SERVICE_DIFF,
+                            SERVICE_FLASH_ESPHOME):
                 hass.services.async_remove(DOMAIN, service)
 
     return unload_ok
@@ -572,6 +589,11 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             _LOGGER.error("Diff failed: %s", err)
             return {"diff": "", "summary": "", "error": str(err)}
 
+    async def async_handle_flash_esphome(call: ServiceCall) -> None:
+        """Owe the named node configs a flash and run it (deploy.async_flash_esphome)."""
+        await async_queue_esphome(hass, call.data["configurations"])
+        async_schedule_esphome(hass)
+
     # LOCAL PATCH (tycstation): Git configuration operations require an administrator.
     if not hass.services.has_service(DOMAIN, SERVICE_COMMIT):
         async_register_admin_service(
@@ -594,4 +616,9 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             SERVICE_DIFF,
             async_handle_diff,
             supports_response=SupportsResponse.ONLY,
+        )
+        # LOCAL PATCH (tycstation): retry an ESPHome flash a pull owed (deploy.py).
+        async_register_admin_service(
+            hass, DOMAIN, SERVICE_FLASH_ESPHOME, async_handle_flash_esphome,
+            schema=SERVICE_FLASH_ESPHOME_SCHEMA,
         )

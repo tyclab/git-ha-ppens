@@ -3,6 +3,7 @@
 Pure function of (path, old text, new text) with no Home Assistant import, so
 the lightweight pytest job runs it. Every reload below is proven against the
 pinned HA image by tests/gitops_reload_runtime.py; anything else restarts.
+A changed ESPHome node also names the node to flash (deploy.py, after the apply).
 """
 
 from __future__ import annotations
@@ -61,6 +62,31 @@ NOTHING_FILES = frozenset({
     ".pre-commit-config.yaml", ".yamllint", "Makefile", "renovate.json",
     "secrets.yaml.example", "blueprints/.yamllint",
 })
+# HA never reads esphome/; a pulled node config is compiled and flashed over the
+# air instead (deploy.async_flash_esphome). ESPHOME_ALL: a shared include or
+# local component changed, so every node the builder knows.
+ESPHOME_DIR = "esphome/"
+ESPHOME_ALL = "*"
+_ESPHOME_REPO_ONLY = ("secrets.yaml",)
+
+
+def esphome_node(path: str) -> str | None:
+    """The node config (`<node>.yaml`) a changed path flashes, ESPHOME_ALL, or None."""
+    if not path.startswith(ESPHOME_DIR):
+        return None
+    rest = path[len(ESPHOME_DIR):]
+    name = rest.rsplit("/", 1)[-1]
+    if any(part.startswith(".") for part in rest.split("/")):  # .gitignore, builder state
+        return None
+    if name.endswith(".md") or name.startswith("LICENSE"):
+        return None
+    if "/" in rest:
+        return ESPHOME_ALL
+    if rest.endswith((".yaml", ".yml")) and rest not in _ESPHOME_REPO_ONLY:
+        return rest
+    return None
+
+
 # Inputs before their consumers, automations last so they see the rest.
 ORDER = (
     "input_boolean", "input_button", "input_datetime", "input_number",
@@ -105,6 +131,8 @@ class Plan:
     # Changed / removed `<domain>.<key>` helper items deploy.py checks before trusting a reload.
     helpers: list[str] = field(default_factory=list)
     gone: list[str] = field(default_factory=list)
+    # ESPHome node configs to compile and flash once the apply is done.
+    esphome: list[str] = field(default_factory=list)
     head: str = ""
 
     def add(self, path: str, what: str, action: tuple[str, str] | None) -> None:
@@ -126,6 +154,7 @@ class Plan:
             "restart": self.restart,
             "reloads": [f"{d}.{s}" for d, s in self.ordered_reloads()],
             "reasons": list(self.reasons),
+            "esphome": list(self.esphome),
             "head": self.head,
         }
 
@@ -289,6 +318,10 @@ def build_plan(
         spans.setdefault(path, [old, new])[1] = new
     helpers: tuple[dict[str, Any], dict[str, Any]] = ({}, {})
     for path, (old, new) in spans.items():
+        if (node := esphome_node(path)) and node not in plan.esphome:
+            plan.esphome.append(node)
+            what = "every node" if node == ESPHOME_ALL else node
+            plan.reasons.append(f"{path}: ESPHome -> flash {what}")
         if path.endswith(".md"):
             continue
         if path in NOTHING_FILES or path.startswith(NOTHING_PREFIXES):

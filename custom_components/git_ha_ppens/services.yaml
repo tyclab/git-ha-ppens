@@ -37,3 +37,17 @@ sync:
 diff:
   name: Diff
   description: Get the current git diff of uncommitted changes. Returns response data with the diff content and a status summary.
+
+flash_esphome:
+  name: Flash ESPHome nodes
+  description: Compile ESPHome node configs in the Device Builder and flash them over the air, one at a time, stopping at the first failure. A pull does this for the nodes it changes.
+  fields:
+    configurations:
+      name: Node configs
+      description: File names under esphome/ (for example samsung-ac.yaml), or * for every node.
+      required: true
+      example: "samsung-ac.yaml"
+      selector:
+        text:
+          multiple: true
+

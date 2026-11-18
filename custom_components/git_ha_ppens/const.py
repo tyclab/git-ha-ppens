@@ -68,6 +68,8 @@ SERVICE_PULL: Final = "pull"
 SERVICE_SYNC: Final = "sync"
 SERVICE_FETCH: Final = "fetch"
 SERVICE_DIFF: Final = "diff"
+# LOCAL PATCH (tycstation): flash ESPHome nodes again (deploy.async_flash_esphome).
+SERVICE_FLASH_ESPHOME: Final = "flash_esphome"
 
 # Service parameters
 ATTR_MESSAGE: Final = "message"
