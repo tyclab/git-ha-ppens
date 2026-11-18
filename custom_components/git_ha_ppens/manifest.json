@@ -3,10 +3,10 @@
   "name": "git-ha-ppens",
   "codeowners": ["@manuveli"],
   "config_flow": true,
-  "documentation": "https://github.com/manuveli/git-ha-ppens",
+  "documentation": "https://github.com/tyclab/git-ha-ppens",
   "integration_type": "service",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/manuveli/git-ha-ppens/issues",
+  "issue_tracker": "https://github.com/tyclab/git-ha-ppens/issues",
   "requirements": ["watchdog==6.0.0"],
-  "version": "0.7.0"
+  "version": "0.7.0.1"
 }
