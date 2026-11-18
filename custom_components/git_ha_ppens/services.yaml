@@ -44,9 +44,9 @@ flash_esphome:
   fields:
     configurations:
       name: Node configs
-      description: File names under esphome/ (for example samsung-ac.yaml), or * for every node.
+      description: File names under esphome/ (for example living-room.yaml), or * for every node.
       required: true
-      example: "samsung-ac.yaml"
+      example: "living-room.yaml"
       selector:
         text:
           multiple: true

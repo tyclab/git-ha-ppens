@@ -2,7 +2,7 @@
 
 The decision needs each file's old text, which only git holds, and a failed
 reload must fall back to a restart, which an automation cannot catch; hence
-this replaces the former packages/gitops.yaml automation.
+it is done here rather than in an automation on the pull event.
 
 A pulled ESPHome node config is compiled and flashed over the air after the
 apply, through HA's own ESPHome dashboard link (the firmware update entities'

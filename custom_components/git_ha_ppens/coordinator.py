@@ -126,10 +126,10 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
 
         # LOCAL PATCH (tycstation): publish a box that is only ahead. The push
         # after a healing pull runs while that pull's restart stops HA and can
-        # be lost there; afterwards only another pull or
-        # a file event pushed, so the box stayed ahead until a merge that did
-        # not restart. Once per fetch, so a failing remote is retried at the
-        # fetch interval, not every poll. See HACS_COMPONENTS.md.
+        # be lost there; afterwards only another pull or a file event pushed,
+        # so the box stayed ahead until a merge that did not restart. Once per
+        # fetch, so a failing remote is retried at the fetch interval, not
+        # every poll.
         if (
             fetched
             and self._auto_push
@@ -173,7 +173,7 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                 try:
                     # LOCAL PATCH (tycstation): capture HEAD before the pull so
                     # deploy.py can plan restart, reloads or nothing from the
-                    # diff, and the event carries it. See HACS_COMPONENTS.md.
+                    # diff, and the event carries it.
                     pre_pull_head = await self.git_manager.get_head_sha()
                     commits_pulled = await self.git_manager.pull(
                         backup=True, validate=self.pre_deploy_validator()

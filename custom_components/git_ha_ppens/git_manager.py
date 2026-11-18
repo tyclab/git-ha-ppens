@@ -617,7 +617,7 @@ class GitManager:
         # merge and then to a leased force-push; this box pushes straight to a
         # protected `main`, so both would publish an unreviewed — possibly
         # conflicted — tree. The pre-deploy-checked pull path heals divergence
-        # here. See HACS_COMPONENTS.md; the CI fork gate greps for those flags.
+        # here.
         await self._run_git("fetch", "origin", branch, check=False)
         behind = 0
         ab_output = await self._run_git(

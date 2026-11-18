@@ -1,8 +1,9 @@
 """LOCAL PATCH (tycstation): decide restart, reloads or nothing from a pull's diff.
 
 Pure function of (path, old text, new text) with no Home Assistant import, so
-the lightweight pytest job runs it. Every reload below is proven against the
-pinned HA image by tests/gitops_reload_runtime.py; anything else restarts.
+plain pytest runs it. Every reload below is proven against a running Home
+Assistant by the tests of the configuration that vendors this fork; anything
+else restarts.
 A changed ESPHome node also names the node to flash (deploy.py, after the apply).
 """
 
