@@ -55,6 +55,7 @@ from .const import (
     SERVICE_SYNC,
 )
 from .coordinator import GitHaPpensCoordinator
+from .deploy import async_init_applied, async_plan_pull, async_schedule_apply
 from .file_watcher import GitFileWatcher
 from .git_manager import (
     GitError,
@@ -206,6 +207,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_PRE_DEPLOY_CHECK, DEFAULT_PRE_DEPLOY_CHECK
     )
     auto_push = data.get(CONF_AUTO_PUSH, True)
+    # LOCAL PATCH (tycstation): what HA loaded at boot is the base for pull plans.
+    await async_init_applied(hass, git_manager)
     coordinator = GitHaPpensCoordinator(
         hass,
         git_manager,
@@ -418,14 +421,26 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Handle the pull service call."""
         try:
             git_manager, coordinator = _get_manager_and_coordinator(call)
+            # LOCAL PATCH (tycstation): same changed-file payload and apply
+            # plan as the auto-pull (deploy.py), so a manual pull applies too.
+            pre_pull_head = await git_manager.get_head_sha()
             commits_pulled = await git_manager.pull(
                 backup=True, validate=coordinator.pre_deploy_validator()
             )
             coordinator.record_pull_time()
+            changed_files = await git_manager.diff_name_only(pre_pull_head)
+            plan = await async_plan_pull(hass, git_manager, pre_pull_head)
 
             hass.bus.async_fire(
-                EVENT_PULL, {"commits_pulled": commits_pulled, "auto": False}
+                EVENT_PULL,
+                {
+                    "commits_pulled": commits_pulled,
+                    "auto": False,
+                    "changed_files": changed_files,
+                    "apply": plan.as_event(),
+                },
             )
+            async_schedule_apply(hass, plan)
             _LOGGER.info("Pulled %d commit(s) from remote", commits_pulled)
             await coordinator.async_request_refresh()
 

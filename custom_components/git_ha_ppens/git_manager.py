@@ -266,6 +266,28 @@ class GitManager:
             return result
         return ""
 
+    # LOCAL PATCH (tycstation): changed paths for EVENT_PULL ([] on error) and for
+    # deploy.py (strict). --no-renames: a rename must list the old path too.
+    async def diff_name_only(
+        self, ref_a: str, ref_b: str = "HEAD", *, strict: bool = False
+    ) -> list[str]:
+        """Return file paths changed between two refs (empty on error unless strict)."""
+        try:
+            if not ref_a:
+                raise GitError("no base ref")
+            out = await self._run_git("diff", "--no-renames", "--name-only", ref_a, ref_b)
+        except GitError:
+            if strict:
+                raise
+            return []
+        return [line.strip() for line in out.splitlines() if line.strip()]
+
+    async def show_file(self, ref: str, path: str) -> str | None:
+        """Return a file's text at a ref, or None if it does not exist there."""
+        if not await self._run_git("ls-tree", "--name-only", ref, "--", path):
+            return None
+        return await self._run_git("show", f"{ref}:{path}")
+
     async def reset_hard(self, ref: str) -> None:
         """Hard-reset the working tree to the given ref (rollback)."""
         await self._run_git("reset", "--hard", ref)
@@ -327,7 +349,6 @@ class GitManager:
         if not await self.is_repo_initialized():
             return status
 
-        # Get current branch
         try:
             branch = await self._run_git(
                 "rev-parse", "--abbrev-ref", "HEAD", check=False
@@ -360,7 +381,6 @@ class GitManager:
         except GitError:
             pass
 
-        # Get last commit info
         try:
             log_format = await self._run_git(
                 "log", "-1", "--format=%H%n%h%n%s%n%an%n%aI", check=False
@@ -379,7 +399,6 @@ class GitManager:
         except GitError:
             pass
 
-        # Get total commit count
         try:
             count_str = await self._run_git("rev-list", "--count", "HEAD", check=False)
             if count_str and "fatal" not in count_str.lower():
@@ -422,7 +441,6 @@ class GitManager:
         Returns:
             CommitInfo for the new commit, or None if nothing to commit.
         """
-        # Check for changes
         porcelain = await self._run_git("status", "--porcelain")
         if not porcelain:
             _LOGGER.debug("Nothing to commit")
@@ -439,10 +457,8 @@ class GitManager:
         # `main`, where history cannot be rewritten to drop a leaked secret.
         await self._assert_no_secret_paths_staged()
 
-        # Commit
         await self._run_git("commit", "-m", message)
 
-        # Get the commit info
         log_output = await self._run_git(
             "log", "-1", "--format=%H%n%h%n%s%n%an%n%aI"
         )
@@ -532,7 +548,6 @@ class GitManager:
                 or diverged — nothing is merged or force-pushed.
             GitError: If the push fails for any other reason.
         """
-        # Pre-check: verify remote is configured before attempting any push
         if not await self.is_remote_configured():
             raise GitError(
                 "Remote 'origin' is not configured. "
@@ -543,7 +558,6 @@ class GitManager:
         branch = await self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         has_upstream = await self._has_upstream()
 
-        # Count commits to push
         ahead = 0
         if has_upstream:
             try:
@@ -662,7 +676,6 @@ class GitManager:
                 secret-shaped path (index reset, nothing committed or pulled).
             GitError: If the pull itself fails.
         """
-        # Pre-check: verify remote is configured
         if not await self.is_remote_configured():
             raise GitError(
                 "Remote 'origin' is not configured. "
@@ -670,7 +683,6 @@ class GitManager:
                 "(Settings → Devices & Services → git-ha-ppens → Configure)."
             )
 
-        # Backup uncommitted changes before pull
         if backup:
             porcelain = await self._run_git("status", "--porcelain")
             if porcelain:
@@ -685,7 +697,6 @@ class GitManager:
                 )
                 _LOGGER.info("Created backup commit before pull")
 
-        # Get commit count before pull
         try:
             count_before = int(
                 await self._run_git("rev-list", "--count", "HEAD")
@@ -696,6 +707,8 @@ class GitManager:
         # Capture HEAD right before the merge so a rollback restores this exact
         # state (including the backup commit above) and only discards the merge.
         pre_pull_head = await self.get_head_sha()
+        # LOCAL PATCH (tycstation): deploy.py splits box-side from pulled changes here.
+        self.last_pre_merge_head = pre_pull_head
 
         branch = await self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         try:
@@ -722,7 +735,6 @@ class GitManager:
                 ) from err
             raise
 
-        # Count new commits
         try:
             count_after = int(
                 await self._run_git("rev-list", "--count", "HEAD")

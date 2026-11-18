@@ -26,6 +26,7 @@ from .const import (
     EVENT_PULL,
     EVENT_PUSH,
 )
+from .deploy import async_plan_pull, async_schedule_apply
 from .git_manager import (
     GitConflictError,
     GitError,
@@ -170,15 +171,31 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
 
             async with self.git_lock:
                 try:
+                    # LOCAL PATCH (tycstation): capture HEAD before the pull so
+                    # deploy.py can plan restart, reloads or nothing from the
+                    # diff, and the event carries it. See HACS_COMPONENTS.md.
+                    pre_pull_head = await self.git_manager.get_head_sha()
                     commits_pulled = await self.git_manager.pull(
                         backup=True, validate=self.pre_deploy_validator()
                     )
                     self._last_pull_time = datetime.now(tz=timezone.utc)
                     self._blocked_remote_sha = None
+                    changed_files = await self.git_manager.diff_name_only(
+                        pre_pull_head
+                    )
+                    plan = await async_plan_pull(
+                        self.hass, self.git_manager, pre_pull_head
+                    )
                     self.hass.bus.async_fire(
                         EVENT_PULL,
-                        {"commits_pulled": commits_pulled, "auto": True},
+                        {
+                            "commits_pulled": commits_pulled,
+                            "auto": True,
+                            "changed_files": changed_files,
+                            "apply": plan.as_event(),
+                        },
                     )
+                    async_schedule_apply(self.hass, plan)
                     _LOGGER.info(
                         "Auto-pull: %d commit(s) pulled from remote",
                         commits_pulled,
