@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.service import async_register_admin_service
 
 from .ai_commit import async_generate_ai_commit_message
 from .checks import notify_check_failed, notify_secret_blocked
@@ -571,25 +572,25 @@ def _register_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
             _LOGGER.error("Diff failed: %s", err)
             return {"diff": "", "summary": "", "error": str(err)}
 
-    # Only register services once
+    # LOCAL PATCH (tycstation): Git configuration operations require an administrator.
     if not hass.services.has_service(DOMAIN, SERVICE_COMMIT):
-        hass.services.async_register(
-            DOMAIN, SERVICE_COMMIT, async_handle_commit, schema=SERVICE_COMMIT_SCHEMA
+        async_register_admin_service(
+            hass, DOMAIN, SERVICE_COMMIT, async_handle_commit, schema=SERVICE_COMMIT_SCHEMA
         )
-        hass.services.async_register(
-            DOMAIN, SERVICE_PUSH, async_handle_push
+        async_register_admin_service(
+            hass, DOMAIN, SERVICE_PUSH, async_handle_push
         )
-        hass.services.async_register(
-            DOMAIN, SERVICE_PULL, async_handle_pull
+        async_register_admin_service(
+            hass, DOMAIN, SERVICE_PULL, async_handle_pull
         )
-        hass.services.async_register(
-            DOMAIN, SERVICE_FETCH, async_handle_fetch
+        async_register_admin_service(
+            hass, DOMAIN, SERVICE_FETCH, async_handle_fetch
         )
-        hass.services.async_register(
-            DOMAIN, SERVICE_SYNC, async_handle_sync, schema=SERVICE_COMMIT_SCHEMA
+        async_register_admin_service(
+            hass, DOMAIN, SERVICE_SYNC, async_handle_sync, schema=SERVICE_COMMIT_SCHEMA
         )
-        hass.services.async_register(
-            DOMAIN,
+        async_register_admin_service(
+            hass, DOMAIN,
             SERVICE_DIFF,
             async_handle_diff,
             supports_response=SupportsResponse.ONLY,
