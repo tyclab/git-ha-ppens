@@ -24,6 +24,7 @@ from .const import (
     EVENT_ERROR,
     EVENT_FETCH,
     EVENT_PULL,
+    EVENT_PUSH,
 )
 from .git_manager import (
     GitConflictError,
@@ -46,6 +47,7 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
         git_manager: GitManager,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
         auto_pull: bool = False,
+        auto_push: bool = False,
         remote_configured: bool = False,
         fetch_interval: int = DEFAULT_FETCH_INTERVAL,
         pre_deploy_check: bool = False,
@@ -59,6 +61,7 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
         )
         self.git_manager = git_manager
         self._auto_pull = auto_pull
+        self._auto_push = auto_push
         self._remote_configured = remote_configured
         self._fetch_interval = fetch_interval
         self._pre_deploy_check = pre_deploy_check
@@ -111,13 +114,37 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
     async def _async_update_data(self) -> GitStatus:
         """Fetch git status from the repository."""
         # Fetch from remote if enough time has passed
+        fetched = False
         if self._remote_configured:
-            await self._maybe_fetch()
+            fetched = await self._maybe_fetch()
 
         try:
             status = await self.git_manager.get_status()
         except GitError as err:
             raise UpdateFailed(f"Error fetching git status: {err}") from err
+
+        # LOCAL PATCH (tycstation): publish a box that is only ahead. The push
+        # after a healing pull runs while that pull's restart stops HA and can
+        # be lost there; afterwards only another pull or
+        # a file event pushed, so the box stayed ahead until a merge that did
+        # not restart. Once per fetch, so a failing remote is retried at the
+        # fetch interval, not every poll. See HACS_COMPONENTS.md.
+        if (
+            fetched
+            and self._auto_push
+            and status.ahead > 0
+            and status.behind == 0
+            and not self.git_lock.locked()
+        ):
+            _LOGGER.warning(
+                "Box is %d commit(s) ahead and not behind after a fetch: "
+                "pushing what an earlier push did not land",
+                status.ahead,
+            )
+            async with self.git_lock:
+                status = await self._async_push_ahead(
+                    status, "Auto-push of an ahead-only box"
+                )
 
         # Auto-pull if enabled and remote has new commits
         if self._auto_pull and self._remote_configured and status.behind > 0:
@@ -162,6 +189,16 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                         status = await self.git_manager.get_status()
                     except GitError:
                         pass
+
+                    # LOCAL PATCH (tycstation): publish what the pull just
+                    # healed. A rejected push leaves the box ahead of the
+                    # remote, and upstream only retries on the next
+                    # file-watcher event — so a box edit stayed unpushed for
+                    # hours after the divergence that blocked it was resolved.
+                    if self._auto_push and status.ahead > 0:
+                        status = await self._async_push_ahead(
+                            status, "Auto-push after pull"
+                        )
 
                 except PreDeployCheckError as err:
                     _LOGGER.warning(
@@ -214,18 +251,56 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
 
         return status
 
-    async def _maybe_fetch(self) -> None:
-        """Fetch from remote if the fetch interval has elapsed."""
+    async def _async_push_ahead(self, status: GitStatus, label: str) -> GitStatus:
+        """Push the commits the box is ahead by; the caller holds git_lock."""
+        try:
+            commits_pushed = await self.git_manager.push()
+            self.record_push_time()
+            self.hass.bus.async_fire(
+                EVENT_PUSH,
+                {
+                    "commits_pushed": commits_pushed,
+                    "auto": True,
+                },
+            )
+            _LOGGER.info("%s: %d commit(s) pushed", label, commits_pushed)
+            try:
+                status = await self.git_manager.get_status()
+            except GitError:
+                pass
+        except GitConflictError as push_err:
+            _LOGGER.error("Auto-push aborted: %s", push_err)
+            self.hass.bus.async_fire(
+                EVENT_ERROR,
+                {
+                    "operation": "auto_push",
+                    "error": str(push_err),
+                },
+            )
+            notify_sync_blocked(self.hass, "auto-push", str(push_err))
+        except GitError as push_err:
+            _LOGGER.error("Auto-push failed: %s", push_err)
+            self.hass.bus.async_fire(
+                EVENT_ERROR,
+                {
+                    "operation": "auto_push",
+                    "error": str(push_err),
+                },
+            )
+        return status
+
+    async def _maybe_fetch(self) -> bool:
+        """Fetch from remote if the fetch interval has elapsed; True if it did."""
         now = datetime.now(tz=timezone.utc)
 
         if self._last_fetch_time is not None:
             elapsed = (now - self._last_fetch_time).total_seconds()
             if elapsed < self._fetch_interval:
-                return
+                return False
 
         if self.git_lock.locked():
             _LOGGER.debug("Skipping fetch: another git operation in progress")
-            return
+            return False
 
         async with self.git_lock:
             try:
@@ -236,6 +311,7 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                     {"auto": True},
                 )
                 _LOGGER.debug("Auto-fetch completed")
+                return True
             except GitError as err:
                 _LOGGER.warning("Auto-fetch failed: %s", err)
                 # Record time even on failure to avoid hammering a broken remote
@@ -244,3 +320,4 @@ class GitHaPpensCoordinator(DataUpdateCoordinator[GitStatus]):
                     EVENT_ERROR,
                     {"operation": "auto_fetch", "error": str(err)},
                 )
+                return False

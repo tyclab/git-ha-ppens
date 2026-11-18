@@ -205,11 +205,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     pre_deploy_check = data.get(
         CONF_PRE_DEPLOY_CHECK, DEFAULT_PRE_DEPLOY_CHECK
     )
+    auto_push = data.get(CONF_AUTO_PUSH, True)
     coordinator = GitHaPpensCoordinator(
         hass,
         git_manager,
         scan_interval,
         auto_pull=auto_pull,
+        auto_push=auto_push,
         remote_configured=bool(remote_url),
         fetch_interval=fetch_interval,
         pre_deploy_check=pre_deploy_check,
@@ -221,7 +223,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     periodic_unsub = None
     if data.get(CONF_AUTO_COMMIT, False):
         commit_interval = data.get(CONF_COMMIT_INTERVAL, 300)
-        auto_push = data.get(CONF_AUTO_PUSH, True)
         ai_commit_enabled = data.get(CONF_AI_COMMIT_MESSAGES, False)
         ai_agent_id = data.get(CONF_AI_AGENT_ID, "") if ai_commit_enabled else ""
         file_watcher = GitFileWatcher(
