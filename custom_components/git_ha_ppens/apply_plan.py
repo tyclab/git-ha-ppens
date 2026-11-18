@@ -52,7 +52,8 @@ PREFIX_RELOADS: dict[str, tuple[str, str]] = {
 # HA writes these itself (UI editors reload them, bans live in memory), so a
 # box-side commit of them is already live; a pulled one is not.
 HA_WRITTEN = frozenset({"automations.yaml", "scripts.yaml", "scenes.yaml", "ip_bans.yaml"})
-# HA never reads these, or reads them per request (YAML dashboards, /local).
+# HA never reads these, or reads them per request (/local). YAML dashboards
+# also need their native refresh so an already-open tab learns about a pull.
 NOTHING_PREFIXES = (
     "tools/", "tests/", "docs/", "esphome/", ".claude/", "dashboards/", "www/",
 )
@@ -133,6 +134,8 @@ class Plan:
     gone: list[str] = field(default_factory=list)
     # ESPHome node configs to compile and flash once the apply is done.
     esphome: list[str] = field(default_factory=list)
+    # Changed YAML dashboard roots/fragments; refresh also notifies open tabs.
+    dashboards: list[str] = field(default_factory=list)
     head: str = ""
 
     def add(self, path: str, what: str, action: tuple[str, str] | None) -> None:
@@ -155,6 +158,7 @@ class Plan:
             "reloads": [f"{d}.{s}" for d, s in self.ordered_reloads()],
             "reasons": list(self.reasons),
             "esphome": list(self.esphome),
+            "dashboards": list(self.dashboards),
             "head": self.head,
         }
 
@@ -323,6 +327,10 @@ def build_plan(
             what = "every node" if node == ESPHOME_ALL else node
             plan.reasons.append(f"{path}: ESPHome -> flash {what}")
         if path.endswith(".md"):
+            continue
+        if path.startswith("dashboards/") and path.endswith((".yaml", ".yml")):
+            plan.dashboards.append(path)
+            plan.reasons.append(f"{path}: YAML dashboards -> refresh")
             continue
         if path in NOTHING_FILES or path.startswith(NOTHING_PREFIXES):
             continue

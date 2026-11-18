@@ -164,6 +164,31 @@ async def _reload(hass: HomeAssistant, plan: Plan) -> str | None:
                 return f"{domain}.{service} raised {type(err).__name__}: {err}"
             if errors.messages:
                 return f"{domain}.{service} logged: {errors.messages[0]}"
+        if plan.dashboards:
+            # This is the same force-load used by Lovelace's Refresh action. It
+            # replaces the server cache before emitting lovelace_updated, which
+            # makes existing non-editing browser tabs fetch the new configuration.
+            # Match dashboard roots when possible; an included fragment has no
+            # exposed dependency list, so it refreshes every YAML dashboard.
+            # An !include change need not alter the root file's mtime. Storage
+            # dashboards and frontend JS/CSS resources are untouched.
+            from homeassistant.components.lovelace.const import LOVELACE_DATA  # noqa: PLC0415
+            from homeassistant.components.lovelace.dashboard import LovelaceYAML  # noqa: PLC0415
+
+            if (data := hass.data.get(LOVELACE_DATA)) is None:
+                return "YAML dashboard refresh: lovelace is not loaded"
+            dashboards = [d for d in data.dashboards.values() if isinstance(d, LovelaceYAML)]
+            changed = {hass.config.path(path) for path in plan.dashboards}
+            includes = bool(changed - {d.path for d in dashboards})
+            try:
+                async with asyncio.timeout(RELOAD_TIMEOUT):
+                    for dashboard in dashboards:
+                        if includes or dashboard.path in changed:
+                            await dashboard.async_load(force=True)
+            except Exception as err:  # noqa: BLE001 - same fallback as service reloads
+                return f"YAML dashboard refresh raised {type(err).__name__}: {err}"
+            if errors.messages:
+                return f"YAML dashboard refresh logged: {errors.messages[0]}"
         return _outside_new_config(hass, before)
     finally:
         for watched in loggers:
@@ -209,11 +234,11 @@ async def _apply(hass: HomeAssistant, plan: Plan) -> str:
         elif missing := [a for a in plan.ordered_reloads() if not hass.services.has_service(*a)]:
             failure = f"{missing[0][0]}.{missing[0][1]} is not loaded"
         else:
-            failure = await _reload(hass, plan) if plan.reloads else None
+            failure = await _reload(hass, plan) if plan.reloads or plan.dashboards else None
         if failure is None:
             if plan.head:
                 hass.data[APPLIED] = plan.head
-            outcome = "reloaded" if plan.reloads else "nothing"
+            outcome = "reloaded" if plan.reloads or plan.dashboards else "nothing"
             _LOGGER.info("Pull apply: %s (%s)", outcome, "; ".join(why) or "no change")
             return outcome
         if not plan.restart:
