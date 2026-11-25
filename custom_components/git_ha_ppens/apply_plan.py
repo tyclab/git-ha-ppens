@@ -57,6 +57,7 @@ HA_WRITTEN = frozenset({"automations.yaml", "scripts.yaml", "scenes.yaml", "ip_b
 # also need their native refresh so an already-open tab learns about a pull.
 NOTHING_PREFIXES = (
     "tools/", "tests/", "docs/", "esphome/", ".claude/", "dashboards/", "www/",
+    "types/",
 )
 NOTHING_FILES = frozenset({
     ".gitattributes", ".gitignore", ".gitlab-ci.yml", ".gitleaks.toml",
